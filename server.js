@@ -1,15 +1,17 @@
 const express = require('express');
 const cors = require('cors');
+const userRouter = require('./routes/userRouter.js');
+const otRouter = require('./routes/otRouter.js');
 
 require('dotenv').config();
 
 
 const app = express();
-const port = process.env.PORT || 3500;
+const port = process.env.PORT || 8087;
 
 // CORS configuration
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://teacher-student-appointment-a7hf.onrender.com','http://localhost:3001', 'http://localhost:3002'],
+  origin: ['http://localhost:5173'],
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],  // Added PATCH
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
@@ -18,6 +20,8 @@ app.use(cors({
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/user', userRouter);
+app.use('/ot',otRouter);
 
 // Health check
 app.get('/', (req, res) => {
