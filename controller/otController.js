@@ -11,6 +11,7 @@ const transporter = nodemailer.createTransport({
 
 const occupiedSlots = new Set();
 const OT_TIMINGS = ["7Am-10Am", "11Am-2Pm", "3Pm-6Pm", "7Pm-10Pm"];
+const NURSE_COOLDOWN_HOURS = 6;
 
 async function assignMedicalStaff(caseType, nurseCount = 4) {
   // Assign doctor
@@ -40,17 +41,37 @@ async function assignMedicalStaff(caseType, nurseCount = 4) {
     }
   }
 
-  // Assign nurses
+  // Assign nurses ensuring 6-hour cooldown
   const nursesSnap = await db.collection("users")
     .where("role", "==", "nurse")
-    .limit(nurseCount)
     .get();
 
-  const nurses = nursesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  const now = new Date();
+  const nurses = [];
+
+  for (let doc of nursesSnap.docs) {
+    const nurse = { id: doc.id, ...doc.data() };
+    const lastAssigned = nurse.lastAssignedTime ? new Date(nurse.lastAssignedTime) : null;
+
+    if (!lastAssigned || (now - lastAssigned) / 36e5 >= NURSE_COOLDOWN_HOURS) {
+      nurses.push(nurse);
+      if (nurses.length === nurseCount) break;
+    }
+  }
 
   return { doctor, assistantDoctor, nurses };
 }
 
+async function updateNurseAssignmentTimes(nurses) {
+  const now = new Date().toISOString();
+  const batch = db.batch();
+
+  for (let nurse of nurses) {
+    const nurseRef = db.collection("users").doc(nurse.id);
+    batch.update(nurseRef, { lastAssignedTime: now });
+  }
+  await batch.commit();
+}
 
 async function sendOTEmail(emails, subject, content) {
   const mailOptions = {
@@ -76,7 +97,6 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
       return res.status(409).json({ success: false, message: "Selected slot is already occupied." });
     }
 
-    // Check if appointment already exists
     const existingSnap = await db.collection("appointments")
       .where("patientEmail", "==", email)
       .limit(1)
@@ -86,7 +106,6 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Patient already has an appointment." });
     }
 
-    // Get patient data
     const userSnap = await db.collection("users").where("email", "==", email).limit(1).get();
     if (userSnap.empty) {
       return res.status(404).json({ success: false, message: "Patient not found." });
@@ -108,19 +127,19 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
       slot,
       otNumber,
       doctor: doctor.username,
-      doctorEmail: doctor.email, // ✅ added
+      doctorEmail: doctor.email,
       assistantDoctor: assistantDoctor.username,
-      assistantDoctorEmail: assistantDoctor.email, // ✅ added
+      assistantDoctorEmail: assistantDoctor.email,
       nurses: nurses.map(n => n.username),
+      nurseIds: nurses.map(n => n.id),
       status: "assigned",
       createdAt: new Date().toISOString()
     };
 
-
     occupiedSlots.add(slotKey);
     const docRef = await db.collection("appointments").add(appointment);
+    await updateNurseAssignmentTimes(nurses);
 
-    // Send email to only the patient
     await sendOTEmail(
       [email],
       "Your OT Appointment is Confirmed",
@@ -129,7 +148,7 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
        <p><strong>Case:</strong> ${caseType}</p>
        <p><strong>Date:</strong> ${date}</p>
        <p><strong>Time Slot:</strong> ${slot}</p>
-       <h1><strong>Operaton Theatre:</strong> ${otNumber}</h1>
+       <h1><strong>Operation Theatre:</strong> ${otNumber}</h1>
        <ul>
          <li><strong>Doctor Assigned:</strong> ${doctor.username}</li>
          <li><strong>Assistant Doctor Assigned:</strong> ${assistantDoctor.username}</li>
@@ -147,7 +166,6 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
     next(err);
   }
 };
-
 
 async function findAvailableSlot() {
   const today = new Date();

@@ -2,9 +2,11 @@ const { db } = require("../firebaseAdmin");
 const bcrypt = require("bcrypt");
 const cloudinary = require("../cloudinaryConfig");
 const multer = require("multer");
+const jwt = require("jsonwebtoken");
+const nodemailer = require("nodemailer");
+
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
-const nodemailer = require("nodemailer");
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -20,19 +22,19 @@ const sendWelcomeEmail = async (toEmail, user) => {
   let text = `Hi ${username || "User"},\n\nYour account has been successfully registered on the Operation Scheduler Platform.\n\n`;
 
   if (role === "patient") {
-    text += `You can now view your assigned doctors, surgery schedule, and reports via the system.\n\nStay safe and we wish you a speedy recovery!\n`;
+    text += `You can now view your assigned doctors, surgery schedule, and reports.\n\n`;
   } else if (role === "doctor") {
-    text += `You can now view your assigned surgeries, patients, and OT schedules in your dashboard.\n`;
+    text += `You can now view your assigned surgeries and patients.\n`;
   } else if (role === "admin") {
-    text += `As an admin, you now have full control over managing doctors, patients, and scheduling OTs.\n`;
+    text += `As an admin, you now manage doctors, patients, and schedules.\n`;
   }
 
-  text += `\nStart managing operations smartly!\n\nRegards,\nHospital Management Team`;
+  text += `\nStart managing operations smartly!\n\nRegards,\nHospital Team`;
 
   await transporter.sendMail({
     from: `"Hospital Admin" <${process.env.EMAIL_USER}>`,
     to: toEmail,
-    subject: `Welcome ${username || "User"} to OT Scheduler Platform`,
+    subject: `Welcome ${username || "User"} to OT Scheduler`,
     text,
   });
 };
@@ -45,17 +47,11 @@ const registerUser = [
       let users = [];
       const body = req.body;
 
-      if (Array.isArray(body)) {
-        users = body;
-      } else if (body.users) {
-        users = typeof body.users === "string" ? JSON.parse(body.users) : body.users;
-      } else if (body.user) {
-        users = typeof body.user === "string" ? [JSON.parse(body.user)] : [body.user];
-      } else if (body.email && body.password) {
-        users = [body];
-      } else {
-        return res.status(400).json({ message: "Invalid request format" });
-      }
+      if (Array.isArray(body)) users = body;
+      else if (body.users) users = typeof body.users === "string" ? JSON.parse(body.users) : body.users;
+      else if (body.user) users = typeof body.user === "string" ? [JSON.parse(body.user)] : [body.user];
+      else if (body.email && body.password) users = [body];
+      else return res.status(400).json({ message: "Invalid request format" });
 
       const results = [];
 
@@ -167,6 +163,15 @@ const loginUser = async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(401).json({ message: "Invalid credentials" });
+
+    const token = jwt.sign({ id: userDoc.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
 
     res.status(200).json({
       id: userDoc.id,
@@ -287,6 +292,49 @@ const deleteUser = async (req, res) => {
   }
 };
 
+// ====================== AUTH CHECK ======================
+const isAuth = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const snapshot = await db.collection("users").doc(userId).get();
+    if (!snapshot.exists) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    return res.status(200).json({ success: true, user: snapshot.data() });
+  } catch (error) {
+    console.log(error.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// ====================== LOGOUT ======================
+const logout = async (req, res) => {
+  try {
+    res.clearCookie("token", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
+    });
+    return res.json({ success: true, message: "Successfully logged out" });
+  } catch (error) {
+    console.log(error.message);
+    res.json({ success: false, message: error.message });
+  }
+};
+
+const sendResetPasswordEmail = async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    const resetLink = await admin.auth().generatePasswordResetLink(email);
+    // You can directly send this via client email system or nodemailer
+    res.status(200).json({ success: true, message: "Password reset link sent", resetLink });
+  } catch (error) {
+    res.status(400).json({ success: false, message: "Failed to send reset link", error: error.message });
+  }
+};
+
+
 module.exports = {
   registerUser,
   loginUser,
@@ -294,5 +342,8 @@ module.exports = {
   getUserByEmail,
   getUsersByRole,
   updateUser,
-  deleteUser
+  deleteUser,
+  isAuth,
+  logout,
+  sendResetPasswordEmail
 };
