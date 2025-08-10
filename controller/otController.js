@@ -209,6 +209,68 @@ const getDoctorAppointmentsByEmail = async (req, res, next) => {
   }
 };
 
+
+
+const getPatientAppointmentsByEmail = async (req, res, next) => {
+  try {
+    const { email } = req.params;
+
+    // Find the patient by email
+    const userSnap = await db.collection("users").where("email", "==", email).limit(1).get();
+    if (userSnap.empty) {
+      return res.status(404).json({ success: false, message: "Patient not found." });
+    }
+
+    const patient = { id: userSnap.docs[0].id, ...userSnap.docs[0].data() };
+
+    // Fetch appointments for the patient
+    const snapshot = await db.collection("appointments")
+      .where("patientEmail", "==", email)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(200).json({
+        success: true,
+        message: "No appointments found for this patient.",
+        patient,
+        appointments: []
+      });
+    }
+
+    // Map appointment data and include OT room info if available
+    const appointments = await Promise.all(snapshot.docs.map(async doc => {
+      const appointmentData = { id: doc.id, ...doc.data() };
+
+      let otRoomDetails = null;
+      if (appointmentData.otNumber) {
+        const otSnap = await db.collection("operationTheatres")
+          .doc(appointmentData.otNumber)
+          .get();
+
+        if (otSnap.exists) {
+          otRoomDetails = { id: otSnap.id, ...otSnap.data() };
+        }
+      }
+
+      return {
+        ...appointmentData,
+        otRoomDetails
+      };
+    }));
+
+    res.status(200).json({
+      success: true,
+      patient,
+      appointments
+    });
+
+  } catch (err) {
+    next(err);
+  }
+};
+
+
+
 const updateOTAppointment = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -225,5 +287,6 @@ module.exports = {
   assignOrBookAppointmentByEmail,
   getAllOTAppointments,
   getDoctorAppointmentsByEmail,
-  updateOTAppointment
+  updateOTAppointment,
+  getPatientAppointmentsByEmail
 };
