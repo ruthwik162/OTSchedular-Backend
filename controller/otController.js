@@ -1,5 +1,13 @@
 const { db } = require("../firebaseAdmin");
 const nodemailer = require("nodemailer");
+const admin = require("firebase-admin");
+const cloudinary = require("cloudinary").v2;
+const multer = require("multer");
+const streamifier = require("streamifier");
+const { v4: uuidv4 } = require("uuid");
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -233,7 +241,8 @@ const getPatientAppointmentsByEmail = async (req, res, next) => {
         success: true,
         message: "No appointments found for this patient.",
         patient,
-        appointments: []
+        appointments: [],
+        reports: patient.reports || []
       });
     }
 
@@ -261,13 +270,15 @@ const getPatientAppointmentsByEmail = async (req, res, next) => {
     res.status(200).json({
       success: true,
       patient,
-      appointments
+      appointments,
+      reports: patient.reports || []
     });
 
   } catch (err) {
     next(err);
   }
 };
+
 
 
 
@@ -283,10 +294,178 @@ const updateOTAppointment = async (req, res, next) => {
   }
 };
 
+// ====================== UPLOAD REPORT FOR OT APPOINTMENT ======================
+const uploadReportForOT = [
+  upload.single("report"), // must match frontend formData field name
+  async (req, res) => {
+    try {
+      const { doctorEmail, patientEmail } = req.params;
+
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: "No file uploaded" });
+      }
+
+      // --- Check Patient ---
+      const patientQuery = await db.collection("users")
+        .where("email", "==", patientEmail)
+        .limit(1)
+        .get();
+      if (patientQuery.empty) {
+        return res.status(404).json({ success: false, message: "Patient not found" });
+      }
+      const patientDoc = patientQuery.docs[0];
+      const patientRef = patientDoc.ref;
+      const patientData = patientDoc.data();
+
+      // --- Check Doctor ---
+      const doctorQuery = await db.collection("users")
+        .where("email", "==", doctorEmail)
+        .limit(1)
+        .get();
+      if (doctorQuery.empty) {
+        return res.status(404).json({ success: false, message: "Doctor not found" });
+      }
+
+      // --- Find OT appointments ---
+      const apptQuery = await db.collection("appointments")
+        .where("doctorEmail", "==", doctorEmail)
+        .where("patientEmail", "==", patientEmail)
+        .get();
+      if (apptQuery.empty) {
+        return res.status(404).json({ success: false, message: "No matching OT appointments found" });
+      }
+
+      // --- Upload to Cloudinary ---
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { folder: "ot_reports", resource_type: "auto" },
+        async (error, result) => {
+          if (error) {
+            console.error("Cloudinary upload error:", error);
+            return res.status(500).json({ success: false, message: "Upload to Cloudinary failed", error });
+          }
+
+          const reportData = {
+            id: uuidv4(),
+            fileUrl: result.secure_url,
+            fileName: req.file.originalname,
+            fileSize: req.file.size, // include file size
+            uploadedBy: doctorEmail,
+            uploadedAt: new Date().toISOString(),
+            patientName: patientData.username || "",
+            patientEmail: patientEmail
+          };
+
+          // Save in patient
+          await patientRef.update({
+            reports: admin.firestore.FieldValue.arrayUnion(reportData)
+          });
+
+          // Save in appointments
+          const batch = db.batch();
+          apptQuery.forEach(doc => {
+            batch.update(doc.ref, {
+              reports: admin.firestore.FieldValue.arrayUnion(reportData)
+            });
+          });
+          await batch.commit();
+
+          res.status(200).json({
+            success: true,
+            message: "Report uploaded successfully",
+            patient: (await patientRef.get()).data(),
+            report: reportData
+          });
+        }
+      );
+
+      // Pipe the file buffer
+      streamifier.createReadStream(req.file.buffer).pipe(uploadStream);
+
+    } catch (error) {
+      console.error("Upload report error:", error);
+      res.status(500).json({ success: false, message: "Server error", error: error.message });
+    }
+  }
+];
+
+
+// ====================== GET PATIENT OT REPORTS ======================
+const getPatientOTReports = async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) return res.status(400).json({ message: "Patient email is required" });
+
+    const patientSnap = await db.collection("users").where("email", "==", email).limit(1).get();
+    if (patientSnap.empty) {
+      return res.status(404).json({ message: "Patient not found" });
+    }
+
+    const patient = patientSnap.docs[0].data();
+    const reports = (patient.reports || []).filter(r => r.appointmentId);
+
+    res.status(200).json({
+      success: true,
+      email,
+      reports,
+    });
+
+  } catch (error) {
+    console.error("Get OT Reports Error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const getDoctorPatientDetails = async (req, res) => {
+  try {
+    const { doctorEmail, patientEmail } = req.params;
+
+    // Get patient
+    const patientSnap = await db.collection("users")
+      .where("email", "==", patientEmail)
+      .limit(1)
+      .get();
+
+    if (patientSnap.empty) {
+      return res.status(404).json({ success: false, message: "Patient not found" });
+    }
+
+    const patient = { id: patientSnap.docs[0].id, ...patientSnap.docs[0].data() };
+
+    // Filter reports that match this doctor
+    const reports = (patient.reports || []).filter(
+      r => r.uploadedByDoctor === doctorEmail
+    );
+
+    // Get OT appointments for this doctor–patient pair
+    const apptSnap = await db.collection("otAppointments")
+      .where("doctorEmail", "==", doctorEmail)
+      .where("patientEmail", "==", patientEmail)
+      .get();
+
+    const appointments = apptSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    res.status(200).json({
+      success: true,
+      patient,
+      reports,
+      appointments
+    });
+
+  } catch (error) {
+    console.error("getDoctorPatientDetails error:", error);
+    res.status(500).json({ success: false, message: "Server error", error });
+  }
+};
+
+
+
 module.exports = {
   assignOrBookAppointmentByEmail,
   getAllOTAppointments,
   getDoctorAppointmentsByEmail,
   updateOTAppointment,
-  getPatientAppointmentsByEmail
+  getPatientAppointmentsByEmail,
+  uploadReportForOT ,
+  getPatientOTReports,
+  getDoctorPatientDetails
 };

@@ -5,14 +5,20 @@ const {
   getAllOTAppointments,
   getDoctorAppointmentsByEmail,
   updateOTAppointment,
-  getPatientAppointmentsByEmail
+  getPatientAppointmentsByEmail,
+  uploadReportForOT,
+  getPatientOTReports,
+  getDoctorPatientDetails
 } = require("../controller/otController");
 
 router.post("/assign/:email", assignOrBookAppointmentByEmail);
 router.get("/all", getAllOTAppointments);
 router.get("/doctor/:email", getDoctorAppointmentsByEmail);
 router.get("/patient/:email", getPatientAppointmentsByEmail);
-
 router.put("/update/:id", updateOTAppointment);
+router.post("/report/:doctorEmail/:patientEmail", uploadReportForOT);
+router.get("/patients/:email", getPatientOTReports);
+router.get("/report/:doctorEmail/:patientEmail", getDoctorPatientDetails);
+
 
 module.exports = router;
