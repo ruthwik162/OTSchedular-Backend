@@ -3,12 +3,14 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 require('dotenv').config();
 
+// Routes
 const userRouter = require('./routes/userRouter.js');
 const otRouter = require('./routes/otRouter.js');
 
 const app = express();
 const port = process.env.PORT || 8087;
 
+// ---------- Middlewares ----------
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -19,16 +21,19 @@ app.use(cors({
   credentials: true,
 }));
 
+app.use(express.json()); // Global JSON parser
+app.use(express.urlencoded({ extended: true })); // Support form data
 app.use(cookieParser());
 
-app.use('/user', express.json(), express.urlencoded({ extended: true }), userRouter);
-
+// ---------- Routes ----------
+app.use('/user', userRouter);
 app.use('/ot', otRouter);
 
 app.get('/', (req, res) => {
-  res.send('API is working');
+  res.status(200).send('API is working 🚀');
 });
 
+// ---------- Start Server ----------
 app.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
+  console.log(`Server is running at: http://localhost:${port}`);
 });

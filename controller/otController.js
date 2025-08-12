@@ -94,7 +94,7 @@ async function sendOTEmail(emails, subject, content) {
 const assignOrBookAppointmentByEmail = async (req, res, next) => {
   try {
     const { email } = req.params;
-    const { date, slot, otNumber } = req.body;
+    const { date, slot, otNumber, status } = req.body; // ✅ allow status from request
 
     if (!email || !date || !slot || !otNumber) {
       return res.status(400).json({ success: false, message: "Email, date, slot, and OT number are required." });
@@ -127,6 +127,20 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
       return res.status(500).json({ success: false, message: "Not enough medical staff available." });
     }
 
+    // ✅ Get OT room details
+    const otSnap = await db.collection("operationTheatres")
+      .doc(otNumber)
+      .get();
+
+    let otRoomDetails = null;
+    if (otSnap.exists) {
+      otRoomDetails = {
+        id: otSnap.id,
+        ...otSnap.data()
+      };
+    }
+
+    // ✅ Add OT room info + assignment metadata
     const appointment = {
       patientEmail: email,
       patientName,
@@ -134,13 +148,20 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
       date,
       slot,
       otNumber,
+      otRoomDetails,
       doctor: doctor.username,
       doctorEmail: doctor.email,
       assistantDoctor: assistantDoctor.username,
       assistantDoctorEmail: assistantDoctor.email,
       nurses: nurses.map(n => n.username),
       nurseIds: nurses.map(n => n.id),
-      status: "assigned",
+      staffEmails: [doctor.email, assistantDoctor.email, ...nurses.map(n => n.email)],
+      status: status || "assigned", // ✅ default to assigned if not provided
+      assignmentMetadata: {
+        assignedBy: "system",
+        assignedAt: new Date().toISOString(),
+        assignmentReason: `OT Scheduling for ${caseType}`
+      },
       createdAt: new Date().toISOString()
     };
 
@@ -148,6 +169,7 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
     const docRef = await db.collection("appointments").add(appointment);
     await updateNurseAssignmentTimes(nurses);
 
+    // ✅ Email to Patient
     await sendOTEmail(
       [email],
       "Your OT Appointment is Confirmed",
@@ -157,17 +179,42 @@ const assignOrBookAppointmentByEmail = async (req, res, next) => {
        <p><strong>Date:</strong> ${date}</p>
        <p><strong>Time Slot:</strong> ${slot}</p>
        <h1><strong>Operation Theatre:</strong> ${otNumber}</h1>
+       <p><strong>Location:</strong> ${otRoomDetails?.location || "N/A"}</p>
+       <p><strong>Capacity:</strong> ${otRoomDetails?.capacity || "N/A"}</p>
        <ul>
          <li><strong>Doctor Assigned:</strong> ${doctor.username}</li>
          <li><strong>Assistant Doctor Assigned:</strong> ${assistantDoctor.username}</li>
          <li><strong>Nurses Assigned:</strong> ${nurses.map(n => n.username).join(", ")}</li>
        </ul>
+       <p><strong>Status:</strong> ${appointment.status}</p>
        <p>Thank you for choosing our hospital.</p>`
+    );
+
+    // ✅ Email to All Staff
+    await sendOTEmail(
+      appointment.staffEmails,
+      "New OT Assignment Notification",
+      `<h1>New OT Assignment</h1>
+       <p>You have been assigned to an OT appointment.</p>
+       <p><strong>Patient:</strong> ${patientName} (${email})</p>
+       <p><strong>Case Type:</strong> ${caseType}</p>
+       <p><strong>Date:</strong> ${date}</p>
+       <p><strong>Slot:</strong> ${slot}</p>
+       <p><strong>OT Room:</strong> ${otNumber}</p>
+       <p><strong>Location:</strong> ${otRoomDetails?.location || "N/A"}</p>
+       <p><strong>Capacity:</strong> ${otRoomDetails?.capacity || "N/A"}</p>
+       <p><strong>Status:</strong> ${appointment.status}</p>
+       <ul>
+         <li><strong>Doctor:</strong> ${doctor.username}</li>
+         <li><strong>Assistant Doctor:</strong> ${assistantDoctor.username}</li>
+         <li><strong>Nurses:</strong> ${nurses.map(n => n.username).join(", ")}</li>
+       </ul>
+       <p>Please prepare accordingly.</p>`
     );
 
     return res.status(201).json({
       success: true,
-      message: "Appointment booked and email sent to patient.",
+      message: "Appointment booked and emails sent to patient and staff.",
       appointment: { id: docRef.id, ...appointment }
     });
   } catch (err) {
@@ -457,6 +504,255 @@ const getDoctorPatientDetails = async (req, res) => {
   }
 };
 
+const bookDoctorAppointment = async (req, res) => {
+  try {
+    const {
+      doctorEmail,
+      subject,
+      message,
+      date,
+      slot,
+      patientEmail,
+      patientName,
+    } = req.body;
+
+    if (!doctorEmail) {
+      return res.status(400).json({ message: "Doctor email is required" });
+    }
+    if (!patientEmail || !patientName) {
+      return res.status(400).json({ message: "Patient email and name are required" });
+    }
+
+    // Check if slot already booked for the doctor with a conflicting status
+    const existingAppointmentQuery = db.collection("doctorAppointments")
+      .where("doctorEmail", "==", doctorEmail)
+      .where("date", "==", date)
+      .where("slot", "==", slot)
+      .where("status", "in", ["pending", "approved", "confirmed"]);
+
+    const existingSnap = await existingAppointmentQuery.get();
+    if (!existingSnap.empty) {
+      return res.status(409).json({ message: "This time slot is already booked for the doctor." });
+    }
+
+    // Get doctor details from users collection
+    const doctorQuery = db.collection("users")
+      .where("email", "==", doctorEmail)
+      .where("role", "==", "doctor");
+
+    const doctorSnap = await doctorQuery.get();
+    if (doctorSnap.empty) {
+      return res.status(404).json({ message: "Doctor not found" });
+    }
+
+    const doctorDoc = doctorSnap.docs[0];
+    const doctorData = doctorDoc.data();
+
+    const appointment = {
+      doctorEmail,
+      doctorName: doctorData.username || doctorData.name || "Unknown",
+      patientEmail,
+      patientName,
+      subject,
+      message,
+      date,
+      slot,
+      status: "pending",
+      assignmentMetadata: {
+        assignedBy: "patient",
+        assignedAt: new Date().toISOString(),
+        assignmentReason: `Doctor Appointment Request for ${subject}`,
+      },
+      createdAt: new Date().toISOString(),
+    };
+
+    const docRef = await db.collection("doctorAppointments").add(appointment);
+
+    res.status(200).json({
+      message: "Doctor appointment booked successfully",
+      id: docRef.id,
+      appointment,
+    });
+
+  } catch (err) {
+    console.error("Error booking doctor appointment:", err);
+    res.status(500).json({ message: "Failed to book doctor appointment" });
+  }
+};
+
+const updateAppointmentStatusByEmail = async (req, res) => {
+  try {
+    const { email } = req.params; // Patient's email
+    const { status } = req.body;
+
+    const allowedStatuses = ["pending", "approved", "confirmed", "cancelled"];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status value" });
+    }
+
+    // Find latest appointment for the patient by createdAt descending
+    const snap = await db.collection("doctorAppointments")
+      .where("patientEmail", "==", email)
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      return res.status(404).json({ message: `No appointment found for patient: ${email}` });
+    }
+
+    const appointmentDoc = snap.docs[0];
+    const docRef = appointmentDoc.ref;
+
+    const updates = {
+      status,
+      "assignmentMetadata.statusUpdatedAt": new Date().toISOString(),
+    };
+
+    if (status === "approved") {
+      updates.approvedAt = new Date().toISOString();
+    }
+
+    await docRef.update(updates);
+
+    // Return updated appointment data
+    const updatedSnap = await docRef.get();
+    const updatedAppointment = { id: updatedSnap.id, ...updatedSnap.data() };
+
+    res.status(200).json({
+      message: `Appointment status updated to '${status}' for patient ${email}`,
+      updatedAppointment,
+    });
+
+  } catch (err) {
+    console.error("Error updating appointment status by email:", err);
+    res.status(500).json({ message: "Failed to update appointment status" });
+  }
+};
+
+const getAllAppointments = async (req, res) => {
+  try {
+    const snap = await db.collection("doctorAppointments").get();
+    if (snap.empty) {
+      return res.status(404).json({ message: "No appointments found" });
+    }
+
+    const appointments = snap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      approvedAt: doc.data().approvedAt || null,
+    }));
+
+    res.status(200).json({ appointments });
+  } catch (err) {
+    console.error("Error fetching all appointments:", err);
+    res.status(500).json({ message: "Failed to fetch appointments" });
+  }
+};
+
+const getAppointmentsByPatientEmail = async (req, res) => {
+  try {
+    const { patientEmail } = req.params;
+    if (!patientEmail) {
+      return res.status(400).json({ message: "Patient email is required" });
+    }
+
+    const snapshot = await db.collection("doctorAppointments")
+      .where("patientEmail", "==", patientEmail)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(404).json({ message: "No appointments found for this patient" });
+    }
+
+    const appointments = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    res.status(200).json({ appointments });
+  } catch (err) {
+    console.error("Error fetching appointments by patient email:", err);
+    res.status(500).json({ message: "Failed to get appointments" });
+  }
+};
+
+const getAppointmentsByDoctorEmail = async (req, res) => {
+  try {
+    const { doctorEmail } = req.params;
+    if (!doctorEmail) {
+      return res.status(400).json({ message: "Doctor email is required" });
+    }
+
+    const snapshot = await db.collection("doctorAppointments")
+      .where("doctorEmail", "==", doctorEmail)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(404).json({ message: "No appointments found for this doctor" });
+    }
+
+    const appointments = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    res.status(200).json({ appointments });
+  } catch (err) {
+    console.error("Error fetching appointments by doctor email:", err);
+    res.status(500).json({ message: "Failed to get appointments" });
+  }
+};
+
+
+
+
+
+const getDoctorPatientAppointments = async (req, res) => {
+  try {
+    const { doctorEmail, patientEmail } = req.params;
+
+    if (!doctorEmail || !patientEmail) {
+      return res.status(400).json({ message: "doctorEmail and patientEmail are required" });
+    }
+
+    let queryRef = db.collection("doctorAppointments")
+      .where("doctorEmail", "==", doctorEmail)
+      .where("patientEmail", "==", patientEmail)
+      .orderBy("createdAt", "desc");
+
+    const snap = await queryRef.get();
+
+    if (snap.empty) {
+      return res.status(404).json({
+        message: `No appointments found for doctor ${doctorEmail} with patient ${patientEmail}`,
+      });
+    }
+
+    const appointments = snap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      approvedAt: doc.data().approvedAt || null,
+    }));
+
+    res.status(200).json({ appointments });
+
+  } catch (err) {
+    console.error("Error fetching doctor-patient appointments:", err);
+
+    if (err.code === 9 && err.message.includes("create index")) {
+      return res.status(500).json({
+        message: "Firestore composite index required to run this query.",
+        hint: "Check Firestore error logs for index creation link.",
+      });
+    }
+
+    res.status(500).json({ message: "Failed to fetch appointments" });
+  }
+};
+
+
+
 
 
 module.exports = {
@@ -467,5 +763,11 @@ module.exports = {
   getPatientAppointmentsByEmail,
   uploadReportForOT ,
   getPatientOTReports,
-  getDoctorPatientDetails
+  getDoctorPatientDetails,
+  bookDoctorAppointment,
+  updateAppointmentStatusByEmail,
+  getAllAppointments,
+  getAppointmentsByPatientEmail,
+  getDoctorPatientAppointments,
+  getAppointmentsByDoctorEmail
 };
