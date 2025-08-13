@@ -14,7 +14,8 @@ const {
   updateAppointmentStatusByEmail,
   getAppointmentsByPatientEmail,
   getDoctorPatientAppointments,
-  getAppointmentsByDoctorEmail
+  getAppointmentsByDoctorEmail,
+  updateAppointmentStatusByDoctorAndPatient
 } = require("../controller/otController");
 
 router.post("/assign/:email", assignOrBookAppointmentByEmail);
@@ -31,6 +32,7 @@ router.get("/report/:doctorEmail/:patientEmail", getDoctorPatientDetails);
 
 router.post("/appointments/doctor", bookDoctorAppointment);
 router.patch("/appointments/status/:email", updateAppointmentStatusByEmail);
+router.patch("/appointments/status/:doctorEmail/:patientEmail", updateAppointmentStatusByDoctorAndPatient);
 router.get("/appointments", getAllAppointments);
 
 router.get("/appointments/patient/:patientEmail", getAppointmentsByPatientEmail);

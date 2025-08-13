@@ -568,8 +568,54 @@ const bookDoctorAppointment = async (req, res) => {
 
     const docRef = await db.collection("doctorAppointments").add(appointment);
 
+    // Prepare email content
+    const emailSubject = `MediCare: Appointment Request Received`;
+    const emailBodyPatient = `
+      Hello ${patientName},
+
+      Your appointment request with Dr. ${appointment.doctorName} on ${date} at slot ${slot} has been received and is pending approval.
+
+      Subject: ${subject}
+      Message: ${message}
+
+      We will notify you once the appointment is confirmed.
+
+      Thank you,
+      MediCare Team
+    `;
+
+    const emailBodyDoctor = `
+      Hello Dr. ${appointment.doctorName},
+
+      You have received a new appointment request from patient ${patientName} (${patientEmail}) on ${date} at slot ${slot}.
+
+      Subject: ${subject}
+      Message: ${message}
+
+      Please review and approve or reject the appointment.
+
+      Thank you,
+      MediCare Team
+    `;
+
+    // Send email to patient
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: patientEmail,
+      subject: emailSubject,
+      text: emailBodyPatient,
+    });
+
+    // Send email to doctor
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: doctorEmail,
+      subject: emailSubject,
+      text: emailBodyDoctor,
+    });
+
     res.status(200).json({
-      message: "Doctor appointment booked successfully",
+      message: "Doctor appointment booked successfully, confirmation emails sent",
       id: docRef.id,
       appointment,
     });
@@ -579,6 +625,7 @@ const bookDoctorAppointment = async (req, res) => {
     res.status(500).json({ message: "Failed to book doctor appointment" });
   }
 };
+
 
 const updateAppointmentStatusByEmail = async (req, res) => {
   try {
@@ -593,7 +640,6 @@ const updateAppointmentStatusByEmail = async (req, res) => {
     // Find latest appointment for the patient by createdAt descending
     const snap = await db.collection("doctorAppointments")
       .where("patientEmail", "==", email)
-      .orderBy("createdAt", "desc")
       .limit(1)
       .get();
 
@@ -603,6 +649,7 @@ const updateAppointmentStatusByEmail = async (req, res) => {
 
     const appointmentDoc = snap.docs[0];
     const docRef = appointmentDoc.ref;
+    const appointmentData = appointmentDoc.data();
 
     const updates = {
       status,
@@ -614,6 +661,40 @@ const updateAppointmentStatusByEmail = async (req, res) => {
     }
 
     await docRef.update(updates);
+
+    // Prepare emails to notify patient and doctor
+    const patientEmailContent = `
+      Hello ${appointmentData.patientName},
+
+      Your appointment with Dr. ${appointmentData.doctorName} on ${appointmentData.date} at slot ${appointmentData.slot} has been updated to status: ${status.toUpperCase()}.
+
+      Thank you,
+      MediCare Team
+    `;
+
+    const doctorEmailContent = `
+      Hello Dr. ${appointmentData.doctorName},
+
+      The appointment with patient ${appointmentData.patientName} (${appointmentData.patientEmail}) on ${appointmentData.date} at slot ${appointmentData.slot} has been updated to status: ${status.toUpperCase()}.
+
+      Thank you,
+      MediCare Team
+    `;
+
+    // Send emails asynchronously (don't wait for completion to respond)
+    transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: appointmentData.patientEmail,
+      subject: `MediCare: Appointment Status Updated to ${status.toUpperCase()}`,
+      text: patientEmailContent,
+    }).catch(err => console.error("Failed to send patient email:", err));
+
+    transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: appointmentData.doctorEmail,
+      subject: `MediCare: Appointment Status Updated to ${status.toUpperCase()}`,
+      text: doctorEmailContent,
+    }).catch(err => console.error("Failed to send doctor email:", err));
 
     // Return updated appointment data
     const updatedSnap = await docRef.get();
@@ -629,6 +710,112 @@ const updateAppointmentStatusByEmail = async (req, res) => {
     res.status(500).json({ message: "Failed to update appointment status" });
   }
 };
+
+
+
+const updateAppointmentStatusByDoctorAndPatient = async (req, res) => {
+  try {
+    const { doctorEmail, patientEmail } = req.params;
+    const { status } = req.body;
+
+    const allowedStatuses = ["pending", "approved", "confirmed", "cancelled"];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status value" });
+    }
+
+    if (!doctorEmail || !patientEmail) {
+      return res.status(400).json({ message: "doctorEmail and patientEmail are required" });
+    }
+
+    // Find latest appointment for doctorEmail & patientEmail
+    const snap = await db.collection("doctorAppointments")
+      .where("doctorEmail", "==", doctorEmail)
+      .where("patientEmail", "==", patientEmail)
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      return res.status(404).json({ message: `No appointment found for doctor ${doctorEmail} with patient ${patientEmail}` });
+    }
+
+    const docRef = snap.docs[0].ref;
+
+    const updates = {
+      status,
+      "assignmentMetadata.statusUpdatedAt": new Date().toISOString(),
+    };
+
+    if (status === "approved") {
+      updates.approvedAt = new Date().toISOString();
+    }
+
+    await docRef.update(updates);
+
+    const updatedSnap = await docRef.get();
+    const updatedAppointment = { id: updatedSnap.id, ...updatedSnap.data() };
+
+    // Send email notifications to doctor and patient
+    const mailOptionsDoctor = {
+      from: process.env.EMAIL_USER,
+      to: doctorEmail,
+      subject: `Appointment Status Updated to '${status}'`,
+      text: `Hello Doctor,
+
+The appointment with patient ${patientEmail} has been updated to status: ${status}.
+
+Details:
+Date: ${updatedAppointment.date || "N/A"}
+Slot: ${updatedAppointment.slot || "N/A"}
+Subject: ${updatedAppointment.subject || "N/A"}
+
+Thank you,
+MediCare System`,
+    };
+
+    const mailOptionsPatient = {
+      from: process.env.EMAIL_USER,
+      to: patientEmail,
+      subject: `Your Appointment Status Updated to '${status}'`,
+      text: `Hello,
+
+Your appointment with doctor ${doctorEmail} has been updated to status: ${status}.
+
+Details:
+Date: ${updatedAppointment.date || "N/A"}
+Slot: ${updatedAppointment.slot || "N/A"}
+Subject: ${updatedAppointment.subject || "N/A"}
+
+Thank you,
+MediCare System`,
+    };
+
+    // Send emails asynchronously, but wait for both to finish before responding
+    await Promise.all([
+      transporter.sendMail(mailOptionsDoctor),
+      transporter.sendMail(mailOptionsPatient),
+    ]);
+
+    res.status(200).json({
+      message: `Appointment status updated to '${status}' for doctor ${doctorEmail} and patient ${patientEmail}, emails sent.`,
+      updatedAppointment,
+    });
+
+  } catch (err) {
+    console.error("Error updating appointment status by doctor and patient emails:", err);
+
+    if (err.code === 9 && err.message.includes("create index")) {
+      return res.status(500).json({
+        message: "Firestore composite index required to run this query.",
+        hint: "Please create the index using the link in Firestore error logs.",
+      });
+    }
+
+    res.status(500).json({ message: "Failed to update appointment status" });
+  }
+};
+
+
+
 
 const getAllAppointments = async (req, res) => {
   try {
@@ -769,5 +956,6 @@ module.exports = {
   getAllAppointments,
   getAppointmentsByPatientEmail,
   getDoctorPatientAppointments,
-  getAppointmentsByDoctorEmail
+  getAppointmentsByDoctorEmail,
+  updateAppointmentStatusByDoctorAndPatient
 };
